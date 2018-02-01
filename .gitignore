@@ -2,9 +2,11 @@
 *.gif
 *.mp4
 
-baselines/*
-dm_control/*
-rllab/*
+.idea/
+
+baselines/
+dm_control/
+rllab/
 
 # Platform-specific files and text editors
 .DS_Store
