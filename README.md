@@ -11,7 +11,7 @@ Reinforcement learning in OpenAI Gym, rllab and DeepMind Control Suite environme
 * OpenAI Gym
 
 ## Reinforcement Learning
-Train for the cart from DeepMind Control Suite via TRPO:
+Train for the cartpole swing-up task from DeepMind Control Suite via TRPO:
 ```sh
 export NUM_CPU=8
 mpirun -np $NUM_CPU python3 rl.py \
