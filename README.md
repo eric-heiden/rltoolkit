@@ -10,6 +10,12 @@ Reinforcement learning in OpenAI Gym, rllab and DeepMind Control Suite environme
 * MPI / mpi4py
 * OpenAI Gym
 
+### Set up submodules
+To install the git submodules, run
+```sh
+git submodule update --init --recursive
+```
+
 ## Reinforcement Learning
 Train for the cartpole swing-up task from DeepMind Control Suite via TRPO:
 ```sh
