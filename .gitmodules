@@ -1,3 +1,9 @@
 [submodule "dm_control"]
 	path = dm_control
 	url = https://github.com/deepmind/dm_control.git
+[submodule "rllab"]
+	path = rllab
+	url = https://github.com/rll/rllab.git
+[submodule "baselines"]
+	path = baselines
+	url = https://github.com/openai/baselines.git
