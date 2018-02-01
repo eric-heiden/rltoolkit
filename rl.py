@@ -8,9 +8,9 @@ import gym, gym.spaces, logging
 import tensorflow as tf
 import numpy as np
 
-sys.path.append(osp.join(os.path.dirname(__file__), 'baselines'))
-sys.path.append(osp.join(os.path.dirname(__file__), 'dm_control'))
-sys.path.append(osp.join(os.path.dirname(__file__), 'rllab'))
+sys.path.append(osp.join(osp.dirname(__file__), 'baselines'))
+sys.path.append(osp.join(osp.dirname(__file__), 'dm_control'))
+sys.path.append(osp.join(osp.dirname(__file__), 'rllab'))
 
 from baselines import bench, logger
 from baselines.acktr.policies import GaussianMlpPolicy
