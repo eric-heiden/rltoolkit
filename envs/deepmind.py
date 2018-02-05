@@ -14,12 +14,16 @@ class DMSuiteEnv(gym.Env):
                  deterministic_reset=False,
                  render_camera=1,
                  render_width=400,
-                 render_height=400):
+                 render_height=400,
+                 dm_env=None):
         domain_name, task_name = tuple(id.split('-'))
-        self.dm_env = suite.load(
-            domain_name=domain_name,
-            task_name=task_name,
-            visualize_reward=visualize_reward)
+        if dm_env is None:
+            self.dm_env = suite.load(
+                domain_name=domain_name,
+                task_name=task_name,
+                visualize_reward=visualize_reward)
+        else:
+            self.dm_env = dm_env
         action_spec = self.dm_env.action_spec()
         self.action_space = Box(
             low=action_spec.minimum[0],
@@ -107,6 +111,7 @@ class DMSuiteEnv(gym.Env):
 
     def _reset(self):
         self.dm_env.reset()
+        self.needs_reset = False
 
         if self.deterministic_reset:
             hinge = mjbindings.enums.mjtJoint.mjJNT_HINGE

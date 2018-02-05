@@ -49,7 +49,7 @@ def rollout(env, policy, max_pathlength, animate=False, obfilter=None):
 
 
 def learn(env, pi, vf, gamma, lam, timesteps_per_batch, num_timesteps,
-          animate=False, callback=None, desired_kl=0.002):
+          animate=False, callback=None, desired_kl=0.002, **_):
     obfilter = ZFilter(env.observation_space.shape)
 
     max_pathlength = env.spec.timestep_limit

@@ -8,9 +8,9 @@ import gym, gym.spaces, logging
 import tensorflow as tf
 import numpy as np
 
-sys.path.append(osp.join(osp.dirname(__file__), 'baselines'))
-sys.path.append(osp.join(osp.dirname(__file__), 'dm_control'))
-sys.path.append(osp.join(osp.dirname(__file__), 'rllab'))
+sys.path.insert(0, osp.join(osp.dirname(__file__), 'baselines'))
+# sys.path.insert(0, osp.join(osp.dirname(__file__), 'dm_control'))
+sys.path.insert(0, osp.join(osp.dirname(__file__), 'rllab'))
 
 from baselines import bench, logger
 from baselines.acktr.policies import GaussianMlpPolicy
@@ -21,7 +21,6 @@ from baselines.common.misc_util import (
 )
 from baselines.ppo1 import pposgd_simple, mlp_policy
 from baselines.trpo_mpi import trpo_mpi
-import baselines.ddpg.training as ddpg_training
 from baselines.ddpg.models import Actor, Critic
 from baselines.ddpg.memory import Memory
 from baselines.ddpg.noise import *
@@ -38,8 +37,57 @@ def save_state(fname):
     saver.save(tf.get_default_session(), fname)
 
 
+def make_folders(environment, method, logdir='logs', **kwargs):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    folder_name = "{timestamp}-{environment}-{method}".format(
+        timestamp=timestamp, environment=environment, method=method)
+    folder_name = os.path.abspath(os.path.join(logdir, folder_name))
+    pathlib.Path(folder_name, "videos").mkdir(parents=True, exist_ok=True)
+    pathlib.Path(folder_name, "checkpoints").mkdir(
+        parents=True, exist_ok=True)
+    return folder_name, timestamp
+
+
+def setup_logging(kwargs):
+    folder_name, timestamp = make_folders(**kwargs)
+    logger.configure(dir=folder_name, format_strs=['log', 'stdout'])
+
+    run_json = {
+        "time": timestamp,
+        "settings": kwargs
+    }
+
+    if len(sys.argv) > 0:
+        run_json["src_files"] = {
+            osp.basename(sys.argv[0]): "".join(open(sys.argv[0], "r"))
+        }
+
+    # noinspection PyBroadException
+    try:
+        import git
+        repo = git.Repo(search_parent_directories=True)
+        run_json["git"] = {
+            "head": repo.head.object.hexsha,
+            "branch": str(repo.active_branch),
+            "summary": repo.head.object.summary,
+            "time": repo.head.object.committed_datetime.strftime("%Y-%m-%d-%H-%M-%S"),
+            "author": {
+                "name": repo.head.object.author.name,
+                "email": repo.head.object.author.email
+            }
+        }
+    except:
+        print("Could not gather git repo information.", file=sys.stderr)
+
+    json.dump(run_json, open(os.path.join(folder_name, "run.json"), "w"), indent=4)
+
+    return folder_name, timestamp
+
+
 def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer_norm, folder, load_policy,
-          video_width, video_height, plot_rewards, **kwargs):
+          video_width, video_height, plot_rewards, save_every=50, seed=1234, episode_length=1000,
+          pi_hid_size=150, pi_num_hid_layers=3,
+          **kwargs):
     if sys.platform == 'darwin':
         num_cpu //= 2
     config = tf.ConfigProto(
@@ -49,8 +97,10 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
     config.gpu_options.allow_growth = True  # pylint: disable=E1101
     tf.Session(config=config).__enter__()
 
-    worker_seed = 1234 + 10000 * MPI.COMM_WORLD.Get_rank()
+    worker_seed = seed + 10000 * MPI.COMM_WORLD.Get_rank()
     set_global_seeds(worker_seed)
+
+    save_every = max(1, save_every)
 
     env = env_fn()
     env.seed(worker_seed)
@@ -64,8 +114,8 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
             name=name,
             ob_space=ob_space,
             ac_space=ac_space,
-            hid_size=150,
-            num_hid_layers=3)
+            hid_size=pi_hid_size,
+            num_hid_layers=pi_num_hid_layers)
 
     env = bench.Monitor(
         env,
@@ -74,18 +124,19 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
     gym.logger.setLevel(logging.INFO)
 
     def callback(locals, globals):
-        if load_policy is not None and locals['iters_so_far'] == 0:
-            # noinspection PyBroadException
-            try:
-                load_state(load_policy)
-                if MPI.COMM_WORLD.Get_rank() == 0:
-                    logger.info("Loaded policy network weights from %s." % load_policy)
-                    # save TensorFlow summary (contains at least the graph definition)
-            except:
-                logger.error("Failed to load policy network weights from %s." % load_policy)
-        if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] == 0:
-            _ = tf.summary.FileWriter(folder, tf.get_default_graph())
-        if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] % 50 == 0:
+        if method != "ddpg":
+            if load_policy is not None and locals['iters_so_far'] == 0:
+                # noinspection PyBroadException
+                try:
+                    load_state(load_policy)
+                    if MPI.COMM_WORLD.Get_rank() == 0:
+                        logger.info("Loaded policy network weights from %s." % load_policy)
+                        # save TensorFlow summary (contains at least the graph definition)
+                except:
+                    logger.error("Failed to load policy network weights from %s." % load_policy)
+            if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] == 0:
+                _ = tf.summary.FileWriter(folder, tf.get_default_graph())
+        if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] % save_every == 0:
             print('Saving video and checkpoint for policy at iteration %i...' %
                   locals['iters_so_far'])
             ob = env.reset()
@@ -93,8 +144,10 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
             rewards = []
             max_reward = 1.  # if any reward > 1, we have to rescale
             lower_part = video_height // 4
-            for i in range(1000):
-                if isinstance(locals['pi'], GaussianMlpPolicy):
+            for i in range(episode_length):
+                if method == "ddpg":
+                    ac, _ = locals['agent'].pi(ob, apply_noise=False, compute_Q=False)
+                elif isinstance(locals['pi'], GaussianMlpPolicy):
                     ac, _, _ = locals['pi'].act(np.concatenate((ob, ob)))
                 else:
                     ac, _ = locals['pi'].act(False, ob)
@@ -108,13 +161,18 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
                     break
 
             color = np.array([255, 163, 0])
+            red = np.array([255, 0, 0])
             for i, img in enumerate(images):
+                img[-lower_part, :10] = color
+                img[-lower_part, -10:] = color
                 for j, r in enumerate(rewards[:i]):
-                    rew_x = int(j / 1000. * video_width)
-                    rew_y = int(r / max_reward * lower_part)
-                    img[-lower_part, :10] = color
-                    img[-lower_part, -10:] = color
-                    img[-rew_y - 1:, rew_x] = color
+                    rew_x = int(j * 1. / episode_length * video_width)
+                    if r < 0:
+                        img[-1:, rew_x] = red
+                    else:
+                        rew_y = int(r / max_reward * lower_part)
+                        img[-rew_y - 1:, rew_x] = color
+
             imageio.mimsave(
                 os.path.join(folder, "videos", "%s_%s_iteration_%i.mp4" %
                              (environment, method, locals['iters_so_far'])),
@@ -122,8 +180,9 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
                 fps=60)
             env.reset()
 
-            save_state(os.path.join(folder, "checkpoints", "%s_%i" %
-                             (environment, locals['iters_so_far'])))
+            if method != "ddpg":
+                save_state(os.path.join(folder, "checkpoints", "%s_%i" %
+                                 (environment, locals['iters_so_far'])))
 
     if method == "ppo":
         pposgd_simple.learn(
@@ -175,6 +234,7 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
                 animate=False,
                 callback=callback)
     elif method == "ddpg":
+        from algos.ddpg import ddpg
         # Parse noise_type
         action_noise = None
         param_noise = None
@@ -213,7 +273,7 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
         critic = Critic(layer_norm=layer_norm)
         actor = Actor(nb_actions, layer_norm=layer_norm)
 
-        ddpg_training.train(
+        ddpg.train(
             env=env,
             eval_env=None,
             param_noise=param_noise,
@@ -223,6 +283,7 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
             actor=actor,
             critic=critic,
             memory=memory,
+            callback=callback,
             **kwargs)
     else:
         print('ERROR: Invalid "method" argument provided.', file=sys.stderr)
@@ -232,42 +293,7 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
 def main(**kwargs):
     rank = MPI.COMM_WORLD.Get_rank()
     if rank == 0:
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        folder_name = "{timestamp}-{kwargs[environment]}-{kwargs[method]}".format(
-            timestamp=timestamp, kwargs=kwargs)
-        folder_name = os.path.abspath(os.path.join(kwargs['logdir'], folder_name))
-        pathlib.Path(folder_name, "videos").mkdir(parents=True, exist_ok=True)
-        pathlib.Path(folder_name, "checkpoints").mkdir(
-            parents=True, exist_ok=True)
-
-        logger.configure(dir=folder_name, format_strs=['log', 'stdout'])
-
-        run_json = {
-            "time": timestamp,
-            "settings": kwargs,
-            "src_files": {
-                "rl.py": "".join(open(sys.argv[0], "r"))  # TODO handle case with no sys.argv[0]
-            }
-        }
-
-        # noinspection PyBroadException
-        try:
-            import git
-            repo = git.Repo(search_parent_directories=True)
-            run_json["git"] = {
-                "head": repo.head.object.hexsha,
-                "branch": str(repo.active_branch),
-                "summary": repo.head.object.summary,
-                "time": repo.head.object.committed_datetime.strftime("%Y-%m-%d-%H-%M-%S"),
-                "author": {
-                    "name": repo.head.object.author.name,
-                    "email": repo.head.object.author.email
-                }
-            }
-        except:
-            print("Could not gather git repo information.", file=sys.stderr)
-
-        json.dump(run_json, open(os.path.join(folder_name, "run.json"), "w"), indent=4)
+        folder_name, _ = setup_logging(kwargs)
     else:
         logger.configure(format_strs=[])
         folder_name = None
