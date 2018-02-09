@@ -56,10 +56,10 @@ class RllabEnv(gym.Env):
                self.action_space.high[0]))
         self._force_reset = True
 
-    def _reset(self):
+    def reset(self):
         return self.rl_env.reset()
 
-    def _step(self, action):
+    def step(self, action):
         s = self.rl_env.step(action)
         return s.observation, s.reward, s.done, s.info
 

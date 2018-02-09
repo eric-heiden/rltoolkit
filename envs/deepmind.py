@@ -66,7 +66,7 @@ class DMSuiteEnv(gym.Env):
         env_spec = namedtuple('env_spec', ['id', 'timestep_limit'])
         self._spec = env_spec(id=id, timestep_limit=1000)
 
-    def _step(self, action):
+    def step(self, action):
         # noinspection PyBroadException
         try:
             step = self.dm_env.step(action)
@@ -109,7 +109,7 @@ class DMSuiteEnv(gym.Env):
         ob = self.observe()
         return ob, reward, done, {}
 
-    def _reset(self):
+    def reset(self):
         self.dm_env.reset()
         self.needs_reset = False
 
@@ -157,7 +157,7 @@ class DMSuiteEnv(gym.Env):
 
         return self.observe()
 
-    def _seed(self, seed=None):
+    def seed(self, seed=None):
         self.dm_env.random = np.random.RandomState(seed)
         return [seed]
 
