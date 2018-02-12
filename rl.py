@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import imageio, os, sys, datetime, pathlib, json
+import imageio, os, sys, datetime, pathlib, jsonpickle
 from mpi4py import MPI
 import os.path as osp
 import gym, gym.spaces, logging
@@ -79,14 +79,19 @@ def setup_logging(kwargs):
     except:
         print("Could not gather git repo information.", file=sys.stderr)
 
-    json.dump(run_json, open(os.path.join(folder_name, "run.json"), "w"), indent=4)
+    with open(os.path.join(folder_name, "run.json"), "w") as f:
+        f.write(jsonpickle.encode(run_json))
 
     return folder_name, timestamp
 
 
+def _render_frames(env):
+    return env.env.render(mode='rgb_array'),
+
+
 def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer_norm, folder, load_policy,
           video_width, video_height, plot_rewards, save_every=50, seed=1234, episode_length=1000,
-          pi_hid_size=150, pi_num_hid_layers=3,
+          pi_hid_size=150, pi_num_hid_layers=3, render_frames=_render_frames,
           **kwargs):
     if sys.platform == 'darwin':
         num_cpu //= 2
@@ -152,31 +157,35 @@ def train(env_fn, environment, num_timesteps, num_cpu, method, noise_type, layer
                 else:
                     ac, _ = locals['pi'].act(False, ob)
                 ob, rew, new, _ = env.step(ac)
-                img = env.env.render(mode='rgb_array')
+                images.append(render_frames(env))
                 if plot_rewards:
                     rewards.append(rew)
                     max_reward = max(rew, max_reward)
-                images.append(img)
                 if new:
                     break
 
             color = np.array([255, 163, 0])
             red = np.array([255, 0, 0])
-            for i, img in enumerate(images):
-                img[-lower_part, :10] = color
-                img[-lower_part, -10:] = color
-                for j, r in enumerate(rewards[:i]):
-                    rew_x = int(j * 1. / episode_length * video_width)
-                    if r < 0:
-                        img[-1:, rew_x] = red
-                    else:
-                        rew_y = int(r / max_reward * lower_part)
-                        img[-rew_y - 1:, rew_x] = color
+            video = []
+            for i, imgs in enumerate(images):
+                for img in imgs:
+                    img[-lower_part, :10] = color
+                    img[-lower_part, -10:] = color
+                    for j, r in enumerate(rewards[:i]):
+                        rew_x = int(j * 1. / episode_length * video_width)
+                        if r < 0:
+                            img[-1:, rew_x] = red
+                            img[-1:, rew_x] = red
+                        else:
+                            rew_y = int(r / max_reward * lower_part)
+                            img[-rew_y - 1:, rew_x] = color
+                            img[-rew_y - 1:, rew_x] = color
+                video.append(np.hstack(imgs))
 
             imageio.mimsave(
                 os.path.join(folder, "videos", "%s_%s_iteration_%i.mp4" %
                              (environment, method, locals['iters_so_far'])),
-                images,
+                video,
                 fps=60)
             env.reset()
 
