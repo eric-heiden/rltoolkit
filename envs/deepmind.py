@@ -7,6 +7,10 @@ from dm_control.mujoco.wrapper import mjbindings
 from gym.spaces import Box
 
 
+def _stop_criterion(step, env):
+    return step.last()
+
+
 class DMSuiteEnv(gym.Env):
     def __init__(self,
                  id="cartpole-swingup",
@@ -15,7 +19,8 @@ class DMSuiteEnv(gym.Env):
                  render_camera=1,
                  render_width=400,
                  render_height=400,
-                 dm_env=None):
+                 dm_env=None,
+                 stop_criterion=_stop_criterion):
         domain_name, task_name = tuple(id.split('-'))
         if dm_env is None:
             self.dm_env = suite.load(
@@ -65,39 +70,17 @@ class DMSuiteEnv(gym.Env):
 
         env_spec = namedtuple('env_spec', ['id', 'timestep_limit'])
         self._spec = env_spec(id=id, timestep_limit=1000)
+        self.stop_criterion = stop_criterion
 
-    def step(self, action):
+    def _step(self, action):
         # noinspection PyBroadException
         try:
             step = self.dm_env.step(action)
-            done = step.last()
+            physics = self.dm_env.physics
+            done = self.stop_criterion(step, self)
             reward = step.reward
             if reward is None:
                 reward = 0
-
-            physics = self.dm_env.physics
-
-            # stop episode when falling
-            _STAND_HEIGHT = 1.4
-            # done = physics.head_height() < _STAND_HEIGHT/4.
-
-            # compute custom reward for standing task
-            # TODO remove
-            # from dm_control.utils import rewards
-            # physics = self.dm_env.physics
-            # _STAND_HEIGHT = 1.4
-            # standing = rewards.tolerance(physics.head_height(),
-            #                              bounds=(_STAND_HEIGHT, float('inf')),
-            #                              margin=_STAND_HEIGHT)
-            # upright = rewards.tolerance(physics.torso_upright(),
-            #                             bounds=(0.9, float('inf')), sigmoid='linear',
-            #                             margin=1.9, value_at_margin=0)
-            # stand_reward = standing * upright
-            # small_control = rewards.tolerance(physics.control(), margin=1,
-            #                                   value_at_margin=0,
-            #                                   sigmoid='quadratic').mean()
-            # small_control = (4 + small_control) / 5
-            # reward = small_control * stand_reward
         except:
             # could only be dm_control.rl.control.PhysicsError?
             # reset environment for bad controls
@@ -109,7 +92,7 @@ class DMSuiteEnv(gym.Env):
         ob = self.observe()
         return ob, reward, done, {}
 
-    def reset(self):
+    def _reset(self):
         self.dm_env.reset()
         self.needs_reset = False
 
@@ -157,7 +140,7 @@ class DMSuiteEnv(gym.Env):
 
         return self.observe()
 
-    def seed(self, seed=None):
+    def _seed(self, seed=None):
         self.dm_env.random = np.random.RandomState(seed)
         return [seed]
 
