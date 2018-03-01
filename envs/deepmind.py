@@ -21,7 +21,11 @@ class DMSuiteEnv(gym.Env):
                  render_height=400,
                  dm_env=None,
                  stop_criterion=_stop_criterion):
-        domain_name, task_name = tuple(id.split('-'))
+        id = id.split('-')
+        if len(id) == 1:
+            domain_name, task_name = id[0], "default"
+        else:
+            domain_name, task_name = id[0], '-'.join(id[1:])
         if dm_env is None:
             self.dm_env = suite.load(
                 domain_name=domain_name,
@@ -35,6 +39,11 @@ class DMSuiteEnv(gym.Env):
             high=action_spec.maximum[0],
             shape=action_spec.shape)
         self.deterministic_reset = deterministic_reset
+
+        self.render_camera = render_camera
+        self.render_width = render_width
+        self.render_height = render_height
+
         try:
             ob_spec = self.dm_env.task.observation_spec(self.dm_env.physics)
             self.observation_space = gym.spaces.Box(
@@ -42,9 +51,8 @@ class DMSuiteEnv(gym.Env):
                 high=ob_spec.maximum[0],
                 shape=ob_spec.shape)
         except NotImplementedError:
-            print(
-                "Could not retrieve observation spec, min/max possibly incorrect.",
-                file=sys.stderr)
+            print("Could not retrieve observation spec, min/max possibly incorrect.",
+                  file=sys.stderr)
             # sample observation and set range to [-10, 10]
             # ob = self.dm_env.task.get_observation(self.dm_env.physics)
             # # ob is an OrderedDict, iterate over all entries to determine overall flattened ob dim
@@ -64,19 +72,18 @@ class DMSuiteEnv(gym.Env):
               (str(self.action_space.shape), self.action_space.low[0],
                self.action_space.high[0]))
 
-        self.render_camera = render_camera
-        self.render_width = render_width
-        self.render_height = render_height
-
-        env_spec = namedtuple('env_spec', ['id', 'timestep_limit'])
-        self._spec = env_spec(id=id, timestep_limit=1000)
+        env_spec = namedtuple('env_spec',
+                              ['id', 'timestep_limit', 'observation_space', 'action_space'])
+        self._spec = env_spec(id=id,
+                              timestep_limit=1000,
+                              observation_space=self.observation_space,
+                              action_space=self.action_space)
         self.stop_criterion = stop_criterion
 
     def _step(self, action):
         # noinspection PyBroadException
         try:
             step = self.dm_env.step(action)
-            physics = self.dm_env.physics
             done = self.stop_criterion(step, self)
             reward = step.reward
             if reward is None:
@@ -145,15 +152,14 @@ class DMSuiteEnv(gym.Env):
         return [seed]
 
     def observe(self):
-        src_ob = self.dm_env.task.get_observation(self.dm_env.physics)
-        ob = np.hstack(entry.flatten() for entry in src_ob.values())
-        # # todo revert to DeepMind's ob
+        ob = self.dm_env.task.get_observation(self.dm_env.physics)
         # ob = np.concatenate([
         #     self.dm_env.physics.data.qpos[:].flat,
         #     self.dm_env.physics.data.qvel[:].flat,
         #     np.clip(self.dm_env.physics.data.cfrc_ext[:], -1, 1).flat,
         #     self.dm_env.physics.center_of_mass_position().flat,
         # ])
+        ob = np.concatenate(list(v.flatten() for v in ob.values()))
         return ob
 
     def render(self, mode='rgb_array', close=False):

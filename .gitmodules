@@ -1,9 +1,12 @@
 [submodule "dm_control"]
 	path = dm_control
 	url = https://github.com/deepmind/dm_control.git
-[submodule "rllab"]
-	path = rllab
-	url = https://github.com/rll/rllab.git
 [submodule "baselines"]
 	path = baselines
 	url = https://github.com/openai/baselines.git
+[submodule "softqlearning"]
+	path = softqlearning
+	url = https://github.com/eric-heiden/softqlearning.git
+[submodule "rllab"]
+	path = rllab
+	url = https://github.com/ryanjulian/rllab.git
