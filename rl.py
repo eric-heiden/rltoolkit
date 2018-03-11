@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import imageio, os, sys, datetime, pathlib, jsonpickle
+import utils
+import subprocess
 from mpi4py import MPI
 import os.path as osp
 import gym, gym.spaces, logging
@@ -9,25 +11,9 @@ import tensorflow as tf
 import numpy as np
 
 sys.path.insert(0, osp.join(osp.dirname(__file__), 'baselines'))
-# sys.path.insert(0, osp.join(osp.dirname(__file__), 'dm_control'))
 sys.path.insert(0, osp.join(osp.dirname(__file__), 'rllab'))
 sys.path.insert(0, osp.join(osp.dirname(__file__), 'softqlearning'))
-
-try:
-    from dm_control.render.glfw_renderer import GLFWContext as _GLFWRenderer
-except:
-    pass
-
-try:
-    from dm_control.render.glfw_renderer import GLFWContext as _GLFWRenderer
-except:
-    pass
-
-try:
-    from dm_control.render.glfw_renderer import GLFWContext as _GLFWRenderer
-except:
-    pass
-
+utils.load_dm_control()
 
 from baselines import bench, logger
 from baselines.acktr.policies import GaussianMlpPolicy
@@ -44,7 +30,7 @@ from baselines.ddpg.noise import *
 
 
 def _render_frames(env):
-    return env.env.render(mode='rgb_array'),
+    return env.render(mode='rgb_array'),
 
 
 class RLToolkit:
@@ -61,11 +47,13 @@ class RLToolkit:
         self.gpu_usage = min(1., gpu_usage)
         self.folder = None
 
-    def load_state(self, fname):
+    @staticmethod
+    def load_state(fname):
         saver = tf.train.Saver()
         saver.restore(tf.get_default_session(), fname)
 
-    def save_state(self, fname):
+    @staticmethod
+    def save_state(fname):
         os.makedirs(os.path.dirname(fname), exist_ok=True)
         saver = tf.train.Saver()
         saver.save(tf.get_default_session(), fname)
@@ -172,10 +160,10 @@ class RLToolkit:
                 hid_size=pi_hid_size,
                 num_hid_layers=pi_num_hid_layers)
 
-        env = bench.Monitor(
-            env,
-            logger.get_dir() and osp.join(logger.get_dir(), str(rank)),
-            allow_early_resets=True)
+        # env = bench.Monitor(
+        #     env,
+        #     logger.get_dir() and osp.join(logger.get_dir(), str(rank)),
+        #     allow_early_resets=True)
         gym.logger.setLevel(logging.INFO)
 
         that = self
@@ -204,6 +192,8 @@ class RLToolkit:
                 for i in range(episode_length):
                     if that.method == "ddpg":
                         ac, _ = locals['agent'].pi(ob, apply_noise=False, compute_Q=False)
+                    elif that.method == "sql":
+                        ac, _ = locals['policy'].get_action(ob)
                     elif isinstance(locals['pi'], GaussianMlpPolicy):
                         ac, _, _ = locals['pi'].act(np.concatenate((ob, ob)))
                     else:
@@ -400,7 +390,7 @@ class RLToolkit:
                 n_train_repeat=variant['n_train_repeat'],
                 eval_render=False,
                 eval_n_episodes=1,
-                # iter_callback=callback
+                iter_callback=callback
             )
 
             qf = NNQFunction(
@@ -445,23 +435,7 @@ def main(**kwargs):
         folder_name = None
 
     def env_fn():
-        ids = kwargs['environment'].split('-')
-        framework = ids[0].lower()
-        env_id = '-'.join(ids[1:])
-        if framework == 'dm':
-            from envs.deepmind import DMSuiteEnv
-            return DMSuiteEnv(env_id,
-                              deterministic_reset=kwargs['deterministic_reset'],
-                              render_camera=kwargs['render_camera'],
-                              render_width=kwargs['video_width'],
-                              render_height=kwargs['video_height'])
-        elif framework == 'gym':
-            return gym.make(env_id)
-        elif framework == 'rllab':
-            from envs.rllab import RllabEnv
-            return RllabEnv(env_id)
-
-        raise LookupError("Could not find environment \"%s\"." % env_id)
+        return utils.create_environment(kwargs['environment'])
 
     folder_name = MPI.COMM_WORLD.bcast(folder_name, root=0)
     rl.train(env_fn=env_fn, folder=folder_name, **kwargs)
@@ -474,17 +448,18 @@ if __name__ == '__main__':
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--num-timesteps', type=int, default=int(10e6))
     parser.add_argument(
-        '--num-cpu', help='number of cpu to used', type=int, default=4)
+        '--num-cpu', help='number of CPUs to use', type=int, default=4)
     parser.add_argument(
         '--method',
         help='reinforcement learning algorithm to use (ppo/trpo/ddpg/acktr/sql)',
         type=str,
-        default='sql')
+        default='ppo')
     parser.add_argument(
         '--environment',
         help='environment ID prefixed by framework, e.g. dm-cartpole-swingup, gym-CartPole-v0, rllab-cartpole',
         type=str,
-        default='dm-humanoid-run')
+        default='dm-cartpole-swingup')
+    # gym-Hopper-v2
     # default='rllab-humanoid')
 
     parser.add_argument(

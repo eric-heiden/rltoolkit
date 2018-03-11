@@ -26,6 +26,7 @@ class DMSuiteEnv(gym.Env):
             domain_name, task_name = id[0], "default"
         else:
             domain_name, task_name = id[0], '-'.join(id[1:])
+        id = "%s-%s" % (domain_name, task_name)
         if dm_env is None:
             self.dm_env = suite.load(
                 domain_name=domain_name,
@@ -37,9 +38,14 @@ class DMSuiteEnv(gym.Env):
         self.action_space = Box(
             low=action_spec.minimum[0],
             high=action_spec.maximum[0],
-            shape=action_spec.shape)
+            shape=action_spec.shape,
+            dtype=np.float32)
         self.deterministic_reset = deterministic_reset
 
+        self.metadata = {
+            'render.modes': ['human', 'rgb_array'],
+            'video.frames_per_second': int(np.round(1.0 / self.dm_env.physics.timestep()))
+        }
         self.render_camera = render_camera
         self.render_width = render_width
         self.render_height = render_height
@@ -49,9 +55,10 @@ class DMSuiteEnv(gym.Env):
             self.observation_space = gym.spaces.Box(
                 low=ob_spec.minimum[0],
                 high=ob_spec.maximum[0],
-                shape=ob_spec.shape)
+                shape=ob_spec.shape,
+                dtype=np.float32)
         except NotImplementedError:
-            print("Could not retrieve observation spec, min/max possibly incorrect.",
+            print("Could not retrieve observation spec, using +/- infinity.",
                   file=sys.stderr)
             # sample observation and set range to [-10, 10]
             # ob = self.dm_env.task.get_observation(self.dm_env.physics)
@@ -62,7 +69,8 @@ class DMSuiteEnv(gym.Env):
             ob = self.observe()
             ob_dimension = len(ob)
             self.observation_space = gym.spaces.Box(
-                low=-10, high=10, shape=(ob_dimension, ))
+                low=-np.inf, high=np.inf, shape=(ob_dimension, ),
+                dtype=np.float32)
         self.reward_range = (0, 1)
         print('Initialized %s: %s.' % (domain_name, task_name))
         print('\tobservation space: %s (min: %.2f, max: %.2f)' %
@@ -80,7 +88,7 @@ class DMSuiteEnv(gym.Env):
                               action_space=self.action_space)
         self.stop_criterion = stop_criterion
 
-    def _step(self, action):
+    def step(self, action):
         # noinspection PyBroadException
         try:
             step = self.dm_env.step(action)
@@ -99,7 +107,7 @@ class DMSuiteEnv(gym.Env):
         ob = self.observe()
         return ob, reward, done, {}
 
-    def _reset(self):
+    def reset(self):
         self.dm_env.reset()
         self.needs_reset = False
 
@@ -147,24 +155,31 @@ class DMSuiteEnv(gym.Env):
 
         return self.observe()
 
-    def _seed(self, seed=None):
+    def seed(self, seed=None):
         self.dm_env.random = np.random.RandomState(seed)
         return [seed]
 
     def observe(self):
         ob = self.dm_env.task.get_observation(self.dm_env.physics)
-        # ob = np.concatenate([
-        #     self.dm_env.physics.data.qpos[:].flat,
-        #     self.dm_env.physics.data.qvel[:].flat,
-        #     np.clip(self.dm_env.physics.data.cfrc_ext[:], -1, 1).flat,
-        #     self.dm_env.physics.center_of_mass_position().flat,
-        # ])
         ob = np.concatenate(list(v.flatten() for v in ob.values()))
         return ob
 
     def render(self, mode='rgb_array', close=False):
-        if mode != 'rgb_array':
-            return
-            # raise NotImplementedError('Render mode %s not implemented for the DM Control Suite environment.' % mode)
-
-        return self.dm_env.physics.render(self.render_width, self.render_height, camera_id=self.render_camera)
+        if mode == 'human':
+            # there is no better way than matplotlib right now (which is extremely slow):
+            # https://github.com/deepmind/dm_control/issues/4
+            import matplotlib.pyplot as plt
+            img = self.dm_env.physics.render(
+                self.render_width,
+                self.render_height,
+                camera_id=self.render_camera)
+            plt.imshow(img)
+            plt.pause(self.dm_env.physics.timestep())
+            plt.draw()
+        elif mode == 'rgb_array':
+            return self.dm_env.physics.render(
+                self.render_width,
+                self.render_height,
+                camera_id=self.render_camera)
+        else:
+            raise NotImplementedError('Render mode %s not implemented for the DM Control Suite environment.' % mode)
