@@ -47,17 +47,6 @@ class RLToolkit:
         self.gpu_usage = min(1., gpu_usage)
         self.folder = None
 
-    @staticmethod
-    def load_state(fname):
-        saver = tf.train.Saver()
-        saver.restore(tf.get_default_session(), fname)
-
-    @staticmethod
-    def save_state(fname):
-        os.makedirs(os.path.dirname(fname), exist_ok=True)
-        saver = tf.train.Saver()
-        saver.save(tf.get_default_session(), fname)
-
     def make_folders(self, logdir='logs', **_):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         folder_name = "{timestamp}-{environment}-{method}".format(
@@ -168,12 +157,13 @@ class RLToolkit:
 
         that = self
 
+        # TODO replace with utils.create_callback(...)
         def callback(locals, globals):
             if that.method != "ddpg":
                 if load_policy is not None and locals['iters_so_far'] == 0:
                     # noinspection PyBroadException
                     try:
-                        self.load_state(load_policy)
+                        utils.load_state(load_policy)
                         if MPI.COMM_WORLD.Get_rank() == 0:
                             logger.info("Loaded policy network weights from %s." % load_policy)
                             # save TensorFlow summary (contains at least the graph definition)
@@ -246,7 +236,7 @@ class RLToolkit:
                 env.reset()
 
                 if that.method != "ddpg":
-                    that.save_state(os.path.join(that.folder, "checkpoints", "%s_%i" %
+                    utils.save_state(os.path.join(that.folder, "checkpoints", "%s_%i" %
                                                  (that.environment, locals['iters_so_far'])))
 
         if self.method == "ppo":

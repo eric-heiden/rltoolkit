@@ -1,4 +1,15 @@
-import gym
+import sys, os, subprocess
+
+from mpi4py import MPI
+
+import gym, imageio
+import tensorflow as tf
+import numpy as np
+
+from typing import Callable
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'baselines'))
+from baselines.acktr.policies import GaussianMlpPolicy
 
 
 def create_environment(name: str) -> gym.Env:
@@ -18,10 +29,7 @@ def create_environment(name: str) -> gym.Env:
 
 
 def load_dm_control():
-    import sys, os, subprocess
-    import os.path as osp
-
-    sys.path.insert(0, osp.join(osp.dirname(__file__), 'dm_control'))
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'dm_control'))
     print("Setting up MuJoCo bindings for dm_control...")
     DEFAULT_HEADERS_DIR = '~/.mujoco/mjpro150/include'
 
@@ -88,3 +96,119 @@ def load_dm_control():
         from dm_control.render.glfw_renderer import GLFWContext as _GLFWRenderer
     except:
         pass
+
+
+def load_state(fname: str):
+    saver = tf.train.Saver()
+    saver.restore(tf.get_default_session(), fname)
+
+
+def save_state(fname: str):
+    os.makedirs(os.path.dirname(fname), exist_ok=True)
+    saver = tf.train.Saver()
+    saver.save(tf.get_default_session(), fname)
+
+
+def _render_frames(env: gym.Env):
+    return env.render(mode='rgb_array'),
+
+
+def create_callback_handler(logger, env_name: str, env: gym.Env, method: str, folder: str,
+                            episode_length: int=1000, save_every: int=50,
+                            video_width: int=400, video_height: int=400,
+                            plot_rewards: bool=True, load_policy: str=None,
+                            render_frames: Callable[[gym.Env], np.array]=_render_frames)\
+        -> Callable[[dict, dict], None]:
+
+    def callback(locals: dict, _globals: dict):
+        if method != "ddpg":
+            if load_policy is not None and locals['iters_so_far'] == 0:
+                # noinspection PyBroadException
+                try:
+                    load_state(load_policy)
+                    if MPI.COMM_WORLD.Get_rank() == 0:
+                        logger.info("Loaded policy network weights from %s." % load_policy)
+                        # save TensorFlow summary (contains at least the graph definition)
+                except:
+                    logger.error("Failed to load policy network weights from %s." % load_policy)
+            if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] == 0:
+                _ = tf.summary.FileWriter(folder, tf.get_default_graph())
+        if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] % save_every == 0:
+            print('Saving video and checkpoint for policy at iteration %i...' %
+                  locals['iters_so_far'])
+            ob = env.reset()
+            images = []
+            rewards = []
+            max_reward = 1.  # if any reward > 1, we have to rescale
+            lower_part = video_height // 5
+            for i in range(episode_length):
+                if method == "ddpg":
+                    ac, _ = locals['agent'].pi(ob, apply_noise=False, compute_Q=False)
+                elif method == "sql":
+                    ac, _ = locals['policy'].get_action(ob)
+                elif isinstance(locals['pi'], GaussianMlpPolicy):
+                    ac, _, _ = locals['pi'].act(np.concatenate((ob, ob)))
+                else:
+                    ac, _ = locals['pi'].act(False, ob)
+                ob, rew, new, _ = env.step(ac)
+                images.append(render_frames(env))
+                if plot_rewards:
+                    rewards.append(rew)
+                    max_reward = max(rew, max_reward)
+                if new:
+                    break
+
+            orange = np.array([255, 163, 0])
+            red = np.array([255, 0, 0])
+            video = []
+            width_factor = 1. / episode_length * video_width
+            for i, imgs in enumerate(images):
+                for img in imgs:
+                    img[-lower_part, :10] = orange
+                    img[-lower_part, -10:] = orange
+                    if episode_length < video_width:
+                        p_rew_x = 0
+                        for j, r in enumerate(rewards[:i]):
+                            rew_x = int(j * width_factor)
+                            if r < 0:
+                                img[-1:, p_rew_x:rew_x] = red
+                                img[-1:, p_rew_x:rew_x] = red
+                            else:
+                                rew_y = int(r / max_reward * lower_part)
+                                img[-rew_y - 1:, p_rew_x:rew_x] = orange
+                                img[-rew_y - 1:, p_rew_x:rew_x] = orange
+                            p_rew_x = rew_x
+                    else:
+                        for j, r in enumerate(rewards[:i]):
+                            rew_x = int(j * width_factor)
+                            if r < 0:
+                                img[-1:, rew_x] = red
+                                img[-1:, rew_x] = red
+                            else:
+                                rew_y = int(r / max_reward * lower_part)
+                                img[-rew_y - 1:, rew_x] = orange
+                                img[-rew_y - 1:, rew_x] = orange
+                video.append(np.hstack(imgs))
+
+            imageio.mimsave(
+                os.path.join(folder, "videos", "%s_%s_iteration_%i.mp4" %
+                             (env_name, method, locals['iters_so_far'])),
+                video,
+                fps=60)
+            env.reset()
+
+            if method != "ddpg":
+                save_state(os.path.join(folder, "checkpoints", "%s_%i" %
+                                        (env_name, locals['iters_so_far'])))
+
+    return callback
+
+
+def constfn(val):
+    def f(_):
+        return val
+    return f
+
+
+def safemean(xs):
+    return np.nan if len(xs) == 0 else np.mean(xs)

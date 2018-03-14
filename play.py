@@ -14,7 +14,7 @@ utils.load_dm_control()
 from baselines.common.misc_util import boolean_flag
 
 
-def main(logdir, checkpoint, human_render, num_rollouts, max_episode_length, save_videos, save_rollouts):
+def main(logdir, checkpoint, human_render, num_rollouts, max_episode_length, save_videos, save_rollouts, save_separate_rollouts):
     if not osp.exists(osp.join(logdir, 'run.json')):
         raise FileNotFoundError("Could not find run.json.")
 
@@ -53,6 +53,7 @@ def main(logdir, checkpoint, human_render, num_rollouts, max_episode_length, sav
     saver.restore(tf.get_default_session(), checkpoint)
 
     # generate rollouts
+    rollouts = []
     for i_rollout in tqdm(range(num_rollouts), "Computing rollouts"):
         observation = env.reset()
         rollout = {
@@ -80,8 +81,13 @@ def main(logdir, checkpoint, human_render, num_rollouts, max_episode_length, sav
                 osp.join(save_videos, 'rollout_%i.mp4' % i_rollout),
                 video,
                 fps=env.metadata.get('video.frames_per_second', 50))
-        if save_rollouts is not None:
+        if save_rollouts is not None and save_separate_rollouts:
             pkl.dump(rollout, open(osp.join(save_rollouts, 'rollout_%i.pkl' % i_rollout), "wb"))
+        else:
+            rollouts.append(rollout)
+
+    if save_rollouts is not None and not save_separate_rollouts:
+        pkl.dump(rollouts, open(osp.join(save_rollouts, 'rollouts.pkl'), "wb"))
 
 
 if __name__ == '__main__':
@@ -91,6 +97,7 @@ if __name__ == '__main__':
     parser.add_argument('--logdir', type=str, default='logs/2018-03-11-00-37-42-gym-Hopper-v2-ppo')
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--save-rollouts', type=str, default=None)
+    boolean_flag(parser, 'save-separate-rollouts', default=False, help='Save all rollouts in one pickle file')
     parser.add_argument('--save-videos', type=str, default=None)
     boolean_flag(parser, 'human-render', default=True)
     parser.add_argument('--num-rollouts', type=int, default=10)
