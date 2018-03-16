@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import Callable, Union, Optional
 
-import os, sys, datetime, pathlib, jsonpickle, time
+import os, sys, time
 
 import enum
 
@@ -13,11 +13,13 @@ from tqdm import tqdm
 
 import utils
 import os.path as osp
-import gym, gym.spaces, logging
+import gym, gym.spaces
 
 import tensorflow as tf
 import numpy as np
 import pickle as pkl
+
+from experiment import log_parameters, Experiment
 
 sys.path.insert(0, osp.join(osp.dirname(__file__), 'baselines'))
 sys.path.insert(0, osp.join(osp.dirname(__file__), 'rllab'))
@@ -79,6 +81,7 @@ class Discriminator:
     Discriminator is a binary classifier.
     """
 
+    @log_parameters
     def __init__(self, state_dim, hidden_layers=(64, 64), hidden_activation=tf.tanh,
                  entcoeff=0.001, learning_rate=1e-3, name_prefix=""):
         # map features (e.g. state-action pairs) to classifier scores
@@ -154,10 +157,18 @@ class Discriminator:
                 self.generator_features: generator_features,
                 self.expert_features: expert_features
             }
-            return sess.run([entropy, _train], feed_dict)
+            return sess.run([entropy, _train, *self.losses], feed_dict)
+
+        def compute_accuracies(self, generator_features: np.array, expert_features: np.array):
+            feed_dict = {
+                self.generator_features: generator_features,
+                self.expert_features: expert_features
+            }
+            return sess.run([generator_acc, expert_acc], feed_dict)
 
         self.classify = classify
         self.train = train
+        self.compute_accuracies = compute_accuracies
         tf.global_variables_initializer().run(session=sess)
 
     def get_trainable_variables(self):
@@ -266,6 +277,7 @@ class GAIL:
     Generative Adversarial Imitation Learning.
     """
 
+    @log_parameters
     def __init__(self,
                  env: gym.Env,
                  policy_fn: PolicyFunction,
@@ -307,9 +319,9 @@ class GAIL:
         tf.global_variables_initializer().run(session=sess)
         dummy_acs, _, _, _ = dummy_pi.step([dummy_ob])
         dummy_ft = descriptor(self.env, dummy_pi, 0, dummy_ob, dummy_acs[0], 0)
-        logger.logkv("observation space", self.ob_space.shape)
-        logger.logkv("action space", self.ac_space.shape)
-        logger.logkv("feature space", dummy_ft.shape)
+        logger.logkv("observation space", self.ob_space.shape[0])
+        logger.logkv("action space", self.ac_space.shape[0])
+        logger.logkv("feature space", dummy_ft.shape[0])
         logger.dumpkvs()
         self.ft_shape = dummy_ft.shape
         assert self.expert_rollouts.shape[1] == max(self.ft_shape)
@@ -428,15 +440,18 @@ class GAIL:
         assert batch.shape[0] == length
         return batch
 
+    @log_parameters
     def train(self,
               total_timesteps: int,
               nminibatches: int = 4,
               noptepochs: int = 4,
               log_interval: int = 10,
               save_interval: int = 0,
+              discriminator_training_rounds: int = 3,
               callback: Callable[[object, int, EnvType, Policy, dict, dict], None] = lambda **args: None) -> None:
         """
         Trains generator and discriminator.
+        :param discriminator_training_rounds:
         :param callback:
         :param total_timesteps: Number of training iterations.
         :param nminibatches:
@@ -517,15 +532,18 @@ class GAIL:
             #
             # train discriminator
             #
-            expert_features = self._next_expert_batch(obs.shape[0])
-            # update running mean/std for reward_giver
-            # if hasattr(reward_giver, "obs_rms"):
-            #     reward_giver.obs_rms.update(np.concatenate((ob_batch, ob_expert), 0))
-            # *newlosses, g = reward_giver.lossandgrad(ob_batch, ac_batch, ob_expert, ac_expert)
-            # d_adam.update(allmean(g), d_stepsize)
-            # d_losses.append(newlosses)
-            # logger.log(fmt_row(13, np.mean(d_losses, axis=0)))
-            self.discriminator.train(generator_features, expert_features)
+            discriminator_losses = np.zeros((discriminator_training_rounds, 6))
+            for dis_round in range(discriminator_training_rounds):
+                expert_features = self._next_expert_batch(obs.shape[0])
+                # update running mean/std for reward_giver
+                # if hasattr(reward_giver, "obs_rms"):
+                #     reward_giver.obs_rms.update(np.concatenate((ob_batch, ob_expert), 0))
+                # *newlosses, g = reward_giver.lossandgrad(ob_batch, ac_batch, ob_expert, ac_expert)
+                # d_adam.update(allmean(g), d_stepsize)
+                # d_losses.append(newlosses)
+                # logger.log(fmt_row(13, np.mean(d_losses, axis=0)))
+                _, _, *dis_losses = self.discriminator.train(generator_features, expert_features)
+                discriminator_losses[dis_round, :] = np.array(dis_losses)
 
             lossvals = np.mean(mblossvals, axis=0)
             tnow = time.time()
@@ -535,6 +553,13 @@ class GAIL:
                 logger.logkv("nupdates", update)
                 logger.logkv("total_timesteps", update * nbatch)
                 logger.logkv("fps", fps)
+
+                discriminator_losses = np.mean(discriminator_losses, axis=0)
+                logger.logkv("dis_accuracy", .5*(discriminator_losses[4]+discriminator_losses[5]))
+                logger.logkv("dis_loss", .5*(discriminator_losses[0]+discriminator_losses[1]))
+                logger.logkv("dis_entropy", discriminator_losses[2])
+                logger.logkv("dis_entloss", discriminator_losses[3])
+
                 ev = explained_variance(values, returns)
                 logger.logkv("explained_variance", float(ev))
                 logger.logkv('epdisretmean', utils.safemean(returns))
@@ -542,7 +567,7 @@ class GAIL:
                 logger.logkv('eplenmean', utils.safemean([epinfo['l'] for epinfo in epinfobuf]))
                 logger.logkv('time_elapsed', tnow - tfirststart)
                 for (lossval, lossname) in zip(lossvals, self.generator.loss_names):
-                    logger.logkv(lossname, lossval)
+                    logger.logkv('gen_' + lossname, lossval)
                 logger.dumpkvs()
             if save_interval and (update % save_interval == 0 or update == 1) and logger.get_dir():
                 checkdir = osp.join(logger.get_dir(), 'checkpoints')
@@ -556,6 +581,7 @@ class GAIL:
         self.env.close()
 
 
+@log_parameters
 def make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh):
     class CustomMlpPolicy(Policy):
         def __init__(self, sess, ob_space, ac_space, nbatch, _nsteps, reuse=False, name_prefix=""):
@@ -695,7 +721,7 @@ def make_video_saver(folder_name: str, prefix: str, episode_length: int = 500, i
     return save_video
 
 
-def run_gail(num_timesteps: int, environment: str, expert_rollouts: str, seed: int = 0, **_):
+def main(num_timesteps: int, environment: str, expert_rollouts: str, **_):
     # load expert rollouts
     rollouts = pkl.load(open(expert_rollouts, "rb"))
     expert_rollouts = []
@@ -704,34 +730,34 @@ def run_gail(num_timesteps: int, environment: str, expert_rollouts: str, seed: i
         for observation, action in zip(rollout["observation"], rollout["action"]):
             expert_rollouts.append(np.hstack((observation, action)))
 
-    ncpu = 1
-    config = tf.ConfigProto(allow_soft_placement=True,
-                            intra_op_parallelism_threads=ncpu,
-                            inter_op_parallelism_threads=ncpu)
-    tf.Session(config=config).__enter__()
+    def run_gail(seed: int):
+        env = utils.create_environment(environment)
+        set_global_seeds(seed)
 
-    env = utils.create_environment(environment)
-    set_global_seeds(seed)
+        policy_fn = make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh)
+        gail = GAIL(env,
+                    policy_fn,
+                    expert_rollouts,
+                    episode_length=2048,
+                    lam=0.95,
+                    gamma=0.99,
+                    ent_coef=0.0,
+                    lr=3e-4,
+                    cliprange=0.2)
+        video_saver = make_video_saver(
+            folder_name=osp.join(logger.get_dir(), 'videos'),
+            prefix='gail',
+            interval=20
+        )
+        gail.train(nminibatches=32,
+                   noptepochs=10,
+                   log_interval=1,
+                   total_timesteps=num_timesteps,
+                   callback=video_saver)
 
-    policy_fn = make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh)
-    gail = GAIL(env,
-                policy_fn,
-                expert_rollouts,
-                episode_length=2048,
-                lam=0.95,
-                gamma=0.99,
-                ent_coef=0.0,
-                lr=3e-4,
-                cliprange=0.2)
-    video_saver = make_video_saver(
-        folder_name='logs/gail',
-        prefix='gail'
-    )
-    gail.train(nminibatches=32,
-               noptepochs=10,
-               log_interval=1,
-               total_timesteps=num_timesteps,
-               callback=video_saver)
+    experiment = Experiment('GAIL')
+    num_cpu = 4
+    experiment.run(run_gail, num_cpu)
 
 
 if __name__ == '__main__':
@@ -740,7 +766,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--num-timesteps', type=int, default=int(10e6))
-    parser.add_argument('--seed', type=int, default=0)
     parser.add_argument(
         '--environment',
         help='environment ID prefixed by framework, e.g. dm-cartpole-swingup, gym-CartPole-v0, rllab-cartpole',
@@ -771,4 +796,4 @@ if __name__ == '__main__':
     parser.add_argument('--load-policy', type=str, default=None)
 
     args = parser.parse_args()
-    run_gail(**vars(args))
+    main(**vars(args))
