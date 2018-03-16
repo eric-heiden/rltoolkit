@@ -556,9 +556,10 @@ class GAIL:
             discriminator_losses = np.mean(discriminator_losses, axis=0)
             dis_accuracy = .5*(discriminator_losses[4]+discriminator_losses[5])
             if dis_accuracy > discriminator_instance_noise_acc_threshold:
-                self.discriminator_instance_noise_std *= 2.
+                self.discriminator_instance_noise_std *= 0.9
             elif dis_accuracy < discriminator_instance_noise_acc_threshold * 0.7:
-                self.discriminator_instance_noise_std /= 2.
+                self.discriminator_instance_noise_std /= 0.9
+            self.discriminator_instance_noise_std = min(0.5, self.discriminator_instance_noise_std)
 
             lossvals = np.mean(mblossvals, axis=0)
             tnow = time.time()
