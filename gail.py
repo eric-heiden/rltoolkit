@@ -82,7 +82,7 @@ class Discriminator:
     """
 
     @log_parameters
-    def __init__(self, state_dim, hidden_layers=(64, 64), hidden_activation=tf.tanh,
+    def __init__(self, state_dim, hidden_layers=(20, 20), hidden_activation=tf.tanh,
                  entcoeff=0.001, learning_rate=1e-3, name_prefix=""):
         # map features (e.g. state-action pairs) to classifier scores
         # i.e. log-probabilities of (fake, real)
@@ -131,7 +131,7 @@ class Discriminator:
         # Loss + Accuracy terms
         self.losses = [generator_loss, expert_loss, entropy, entropy_loss, generator_acc, expert_acc]
         self.loss_name = ["generator_loss", "expert_loss", "entropy", "entropy_loss", "generator_acc", "expert_acc"]
-        self.total_loss = generator_loss + expert_loss + entropy_loss
+        self.total_loss = generator_loss + expert_loss # + entropy_loss
         # Build Reward for policy
         self.reward_op = -tf.log(1 - tf.nn.sigmoid(generator_logits) + 1e-8)
         # var_list = self.get_trainable_variables()
@@ -331,6 +331,8 @@ class GAIL:
         self.discriminator_fn = discriminator_fn
         self.generator_fn = generator_fn
 
+        self.discriminator_instance_noise_std = 0.2
+
         self.episode_length = episode_length
         self.lr = lr
         self.ent_coef = ent_coef
@@ -447,10 +449,12 @@ class GAIL:
               noptepochs: int = 4,
               log_interval: int = 10,
               save_interval: int = 0,
-              discriminator_training_rounds: int = 3,
+              discriminator_training_rounds: int = 1,
+              discriminator_instance_noise_acc_threshold: float = 0.95,
               callback: Callable[[object, int, EnvType, Policy, dict, dict], None] = lambda **args: None) -> None:
         """
         Trains generator and discriminator.
+        :param discriminator_instance_noise_acc_threshold:
         :param discriminator_training_rounds:
         :param callback:
         :param total_timesteps: Number of training iterations.
@@ -542,8 +546,19 @@ class GAIL:
                 # d_adam.update(allmean(g), d_stepsize)
                 # d_losses.append(newlosses)
                 # logger.log(fmt_row(13, np.mean(d_losses, axis=0)))
-                _, _, *dis_losses = self.discriminator.train(generator_features, expert_features)
+                g_noise = np.random.normal(0.0, self.discriminator_instance_noise_std, expert_features.shape)
+                e_noise = np.random.normal(0.0, self.discriminator_instance_noise_std, expert_features.shape)
+                _, _, *dis_losses = self.discriminator.train(
+                    generator_features + g_noise,
+                    expert_features + e_noise)
                 discriminator_losses[dis_round, :] = np.array(dis_losses)
+
+            discriminator_losses = np.mean(discriminator_losses, axis=0)
+            dis_accuracy = .5*(discriminator_losses[4]+discriminator_losses[5])
+            if dis_accuracy > discriminator_instance_noise_acc_threshold:
+                self.discriminator_instance_noise_std *= 2.
+            elif dis_accuracy < discriminator_instance_noise_acc_threshold * 0.7:
+                self.discriminator_instance_noise_std /= 2.
 
             lossvals = np.mean(mblossvals, axis=0)
             tnow = time.time()
@@ -554,11 +569,11 @@ class GAIL:
                 logger.logkv("total_timesteps", update * nbatch)
                 logger.logkv("fps", fps)
 
-                discriminator_losses = np.mean(discriminator_losses, axis=0)
-                logger.logkv("dis_accuracy", .5*(discriminator_losses[4]+discriminator_losses[5]))
+                logger.logkv("dis_accuracy", dis_accuracy)
                 logger.logkv("dis_loss", .5*(discriminator_losses[0]+discriminator_losses[1]))
                 logger.logkv("dis_entropy", discriminator_losses[2])
                 logger.logkv("dis_entloss", discriminator_losses[3])
+                logger.logkv("dis_noise_std", self.discriminator_instance_noise_std)
 
                 ev = explained_variance(values, returns)
                 logger.logkv("explained_variance", float(ev))
