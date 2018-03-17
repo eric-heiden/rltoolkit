@@ -1,5 +1,8 @@
 import sys, os, subprocess
 
+import glfw
+from gym import Wrapper
+from gym.envs.mujoco import MujocoEnv
 from mpi4py import MPI
 
 import gym, imageio
@@ -8,8 +11,35 @@ import numpy as np
 
 from typing import Callable
 
+from mujoco_py import MjRenderContextOffscreen, MjViewer, cymj
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'baselines'))
 from baselines.acktr.policies import GaussianMlpPolicy
+
+
+class BetterRgbRenderingEnv(Wrapper):
+    def __init__(self, env, camera_name=None, render_width=512, render_height=512):
+        super().__init__(env)
+        self._mujoco_env = isinstance(env, MujocoEnv)
+        if self._mujoco_env and camera_name is None:
+            camera_name = env.sim.model.camera_names[0]
+        self.camera_name = camera_name
+        self.render_width = render_width
+        self.render_height = render_height
+        # TODO this still opens a dead window
+        self.env.sim.add_render_context(cymj.MjRenderContextOffscreen(self.env.sim, 0))
+
+    def render(self, mode='human'):
+        if self._mujoco_env and mode == 'rgb_array':
+            data = self.env.sim.render(
+                self.render_width,
+                self.render_height,
+                camera_name=self.camera_name,
+                device_id=0,
+                mode='offscreen')
+            # original image is upside-down, so flip it
+            return data[::-1, :, :]
+        return self.env.render(mode)
 
 
 def create_environment(name: str) -> gym.Env:
@@ -20,7 +50,7 @@ def create_environment(name: str) -> gym.Env:
         from envs.deepmind import DMSuiteEnv
         return DMSuiteEnv(env_id)
     elif framework == 'gym':
-        return gym.make(env_id)
+        return BetterRgbRenderingEnv(gym.make(env_id).env)
     elif framework == 'rllab':
         from envs.rllab import RllabEnv
         return RllabEnv(env_id)

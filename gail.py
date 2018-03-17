@@ -54,6 +54,10 @@ class Policy(ABC):
     def step(self, observation, *_args, **_kwargs):
         raise NotImplementedError()
 
+    @abstractmethod
+    def step_deterministic(self, observation, *_args, **_kwargs):
+        raise NotImplementedError()
+
     def value(self, observation, *_args, **_kwargs):
         raise NotImplementedError()
 
@@ -82,7 +86,7 @@ class Discriminator:
     """
 
     @log_parameters
-    def __init__(self, state_dim, hidden_layers=(20, 20), hidden_activation=tf.tanh,
+    def __init__(self, state_dim, hidden_layers=(30, 30), hidden_activation=tf.tanh,
                  entcoeff=0.001, learning_rate=1e-3, name_prefix=""):
         # map features (e.g. state-action pairs) to classifier scores
         # i.e. log-probabilities of (fake, real)
@@ -131,7 +135,7 @@ class Discriminator:
         # Loss + Accuracy terms
         self.losses = [generator_loss, expert_loss, entropy, entropy_loss, generator_acc, expert_acc]
         self.loss_name = ["generator_loss", "expert_loss", "entropy", "entropy_loss", "generator_acc", "expert_acc"]
-        self.total_loss = generator_loss + expert_loss # + entropy_loss
+        self.total_loss = generator_loss + expert_loss + entropy_loss
         # Build Reward for policy
         self.reward_op = -tf.log(1 - tf.nn.sigmoid(generator_logits) + 1e-8)
         # var_list = self.get_trainable_variables()
@@ -265,6 +269,7 @@ class Generator(object):
         self.train_model = train_model
         self.act_model = act_model
         self.step = act_model.step
+        self.step_deterministic = act_model.step_deterministic
         self.value = act_model.value
         self.initial_state = act_model.initial_state
         self.save = save
@@ -284,8 +289,8 @@ class GAIL:
                  expert_rollouts: np.array,
                  descriptor: Callable[
                      [EnvType, Policy, int, np.array, np.array, float], np.array] = observations_and_actions,
-                 discriminator_fn: Discriminator.__class__ = Discriminator,
-                 generator_fn: Generator.__class__ = Generator,
+                 discriminator_fn: Callable[[], Discriminator] = Discriminator,
+                 generator_fn: Callable[[], Generator] = Generator,
                  episode_length: int = 2048,
                  lr: float = 3e-4,
                  ent_coef: float = 0.,
@@ -381,16 +386,16 @@ class GAIL:
             mb_neglogpacs.append(neglogpacs)
             mb_dones.append(dones)
             obs[:], env_rewards, dones, infos = self.env.step(actions)
-            mb_env_rewards.append(env_rewards)
+            mb_env_rewards.append(env_rewards[0])
             # compute discriminator's reward
             features = self.descriptor(self.env, self.generator.act_model, time_step, obs, actions, env_rewards)
             mb_features.append(features)
             rewards = self.discriminator.classify(features)
+            mb_rewards.append(rewards[0])
             for info in infos:
                 maybeepinfo = info.get('episode')
                 if maybeepinfo:
                     epinfos.append(maybeepinfo)
-            mb_rewards.append(rewards[0])
         # batch of steps to batch of rollouts
         mb_obs = np.array(mb_obs, dtype=np.float32)
         mb_rewards = np.asarray(mb_rewards, dtype=np.float32)
@@ -404,7 +409,7 @@ class GAIL:
         # discount/bootstrap off value fn
         mb_advs = np.zeros_like(mb_rewards)
         lastgaelam = 0
-        for t in reversed(range(self.episode_length)):
+        for t in reversed(range(mb_obs.shape[0]-1)):
             if t == self.episode_length - 1:
                 nextnonterminal = 1.0 - dones
                 nextvalues = last_values
@@ -449,9 +454,9 @@ class GAIL:
               noptepochs: int = 4,
               log_interval: int = 10,
               save_interval: int = 0,
-              discriminator_training_rounds: int = 1,
+              discriminator_training_rounds: int = 3,
               discriminator_instance_noise_acc_threshold: float = 0.95,
-              callback: Callable[[object, int, EnvType, Policy, dict, dict], None] = lambda **args: None) -> None:
+              callback: Callable[[object, int, EnvType, gym.Env, Policy, dict, dict], None] = lambda **args: None) -> None:
         """
         Trains generator and discriminator.
         :param discriminator_instance_noise_acc_threshold:
@@ -494,6 +499,7 @@ class GAIL:
             nbatch_train = nbatch // nminibatches
             tstart = time.time()
             frac = 1.0 - (update - 1.0) / nupdates
+            # both LR and cliprange are constant right now (no matter what frac is)
             lrnow = self.lr(frac)
             cliprangenow = self.cliprange(frac)
 
@@ -508,11 +514,11 @@ class GAIL:
             mblossvals = []
             if states is None:
                 # nonrecurrent version
-                inds = np.arange(nbatch)
+                inds = np.arange(obs.shape[0])
                 for _ in range(noptepochs):
                     np.random.shuffle(inds)
-                    for start in range(0, nbatch, nbatch_train):
-                        end = start + nbatch_train
+                    for start in range(0, obs.shape[0], nbatch_train):
+                        end = min(obs.shape[0], start + nbatch_train)
                         mbinds = inds[start:end]
                         slices = (arr[mbinds] for arr in (obs, returns, masks, actions, values, neglogpacs))
                         mblossvals.append(self.generator.train(lrnow, cliprangenow, *slices))
@@ -539,13 +545,7 @@ class GAIL:
             discriminator_losses = np.zeros((discriminator_training_rounds, 6))
             for dis_round in range(discriminator_training_rounds):
                 expert_features = self._next_expert_batch(obs.shape[0])
-                # update running mean/std for reward_giver
-                # if hasattr(reward_giver, "obs_rms"):
-                #     reward_giver.obs_rms.update(np.concatenate((ob_batch, ob_expert), 0))
-                # *newlosses, g = reward_giver.lossandgrad(ob_batch, ac_batch, ob_expert, ac_expert)
-                # d_adam.update(allmean(g), d_stepsize)
-                # d_losses.append(newlosses)
-                # logger.log(fmt_row(13, np.mean(d_losses, axis=0)))
+
                 g_noise = np.random.normal(0.0, self.discriminator_instance_noise_std, expert_features.shape)
                 e_noise = np.random.normal(0.0, self.discriminator_instance_noise_std, expert_features.shape)
                 _, _, *dis_losses = self.discriminator.train(
@@ -556,10 +556,10 @@ class GAIL:
             discriminator_losses = np.mean(discriminator_losses, axis=0)
             dis_accuracy = .5*(discriminator_losses[4]+discriminator_losses[5])
             if dis_accuracy > discriminator_instance_noise_acc_threshold:
-                self.discriminator_instance_noise_std *= 0.9
+                self.discriminator_instance_noise_std *= 1.1
             elif dis_accuracy < discriminator_instance_noise_acc_threshold * 0.7:
-                self.discriminator_instance_noise_std /= 0.9
-            self.discriminator_instance_noise_std = min(0.5, self.discriminator_instance_noise_std)
+                self.discriminator_instance_noise_std /= 1.1
+            self.discriminator_instance_noise_std = min(200./update, min(0.5, self.discriminator_instance_noise_std))
 
             lossvals = np.mean(mblossvals, axis=0)
             tnow = time.time()
@@ -576,7 +576,7 @@ class GAIL:
                 logger.logkv("dis_entloss", discriminator_losses[3])
                 logger.logkv("dis_noise_std", self.discriminator_instance_noise_std)
 
-                ev = explained_variance(values, returns)
+                ev = explained_variance(values, returns[:values.shape[0]])
                 logger.logkv("explained_variance", float(ev))
                 logger.logkv('epdisretmean', utils.safemean(returns))
                 logger.logkv('epenvrewmean', utils.safemean([epinfo['r'] for epinfo in epinfobuf]))
@@ -592,7 +592,7 @@ class GAIL:
                 print('Saving generator to', savepath)
                 self.generator.save(savepath)
 
-            callback(self, update, self.raw_env, self.generator.act_model, locals(), globals())
+            callback(self, update, self.env, self.raw_env, self.generator.act_model, locals(), globals())
 
         self.env.close()
 
@@ -600,10 +600,10 @@ class GAIL:
 @log_parameters
 def make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh):
     class CustomMlpPolicy(Policy):
-        def __init__(self, sess, ob_space, ac_space, nbatch, _nsteps, reuse=False, name_prefix=""):
+        def __init__(self, sess, ob_space, ac_space, _nbatch, _nsteps, reuse=False, name_prefix=""):
             super().__init__()
             self.sess = sess
-            ob_shape = (nbatch,) + ob_space.shape
+            ob_shape = (None,) + ob_space.shape
             actdim = ac_space.shape[0]
             self.obs = tf.placeholder(tf.float32, ob_shape, name=name_prefix + 'obs')
             with tf.variable_scope(name_prefix + "model", reuse=reuse):
@@ -624,6 +624,7 @@ def make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh):
             self.pd = self.pdtype.pdfromflat(pdparam)
 
             self.a0 = self.pd.sample()
+            self.adet = self.pd.mode()
             self.neglogp0 = self.pd.neglogp(self.a0)
             self.initial_state = None
 
@@ -634,6 +635,10 @@ def make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh):
             a, v, neglogp = self.sess.run([self.a0, self.vf, self.neglogp0], {self.obs: ob})
             return a, v, self.initial_state, neglogp
 
+        def step_deterministic(self, ob, *_args, **_kwargs):
+            a, v, neglogp = self.sess.run([self.adet, self.vf, self.neglogp0], {self.obs: ob})
+            return a, v, self.initial_state, neglogp
+
         def value(self, ob, *_args, **_kwargs):
             return self.sess.run(self.vf, {self.obs: ob})
 
@@ -641,15 +646,18 @@ def make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh):
 
 
 def make_video_saver(folder_name: str, prefix: str, episode_length: int = 500, interval: int = 5,
-                     video_width: int = 400, video_height: int = 400, plot_rewards: bool = True,
+                     video_width: int = 512, video_height: int = 512, plot_rewards: bool = True,
                      break_when_done: bool = False):
-    def save_video(gail: GAIL, iteration: int, env: gym.Env, policy: Policy, _locals: dict, _globals: dict):
+    def save_video(gail: GAIL, iteration: int, env: EnvType, raw_env: gym.Env, policy: Policy, _locals: dict, _globals: dict):
         if iteration % interval != 0:
             return
         print('Saving video at iteration %i...' % iteration)
 
-        fps = env.metadata.get('video.frames_per_second', 50)
-        modes = env.metadata.get('render.modes', [])
+        fps = 50
+        modes = ['rgb_array']
+        if hasattr(raw_env, 'metadata'):
+            fps = raw_env.metadata.get('video.frames_per_second', fps)
+            modes = raw_env.metadata.get('render.modes', modes)
 
         images = []
         rewards = []
@@ -659,75 +667,71 @@ def make_video_saver(folder_name: str, prefix: str, episode_length: int = 500, i
         lower_part = video_height // 5
 
         obs = env.reset()
+        done_steps = []
         for step in range(episode_length):
-            action, _, _, _ = policy.step([obs])
+            action, _, _, _ = policy.step_deterministic([obs[0]])
             obs, rew, done, _ = env.step(action)
             if 'rgb_array' not in modes:
-                env.render()
+                raw_env.render()
             else:
-                # TODO add support for rendering multiple cameras (as in dm_control envs)
-                images.append((env.render(mode='rgb_array'),))
+                images.append((raw_env.render(mode='rgb_array'),))
             if plot_rewards:
                 # environment rewards
                 rewards.append(rew)
                 max_reward = max(rew, max_reward)
                 # discriminator returns
-                features = gail.descriptor(gail.env, policy, iteration, [obs], action, rew)
+                features = gail.descriptor(env, policy, iteration, obs, action, rew)
                 rets = gail.discriminator.classify(features)
                 returns.append(rets[0])
                 max_return = max(rets[0], max_return)
             if break_when_done and done:
                 break
+            done_steps.append(done)
 
-        orange = np.array([255, 163, 0])
-        green = np.array([100, 200, 50])
+        orange = np.array([255, 128, 0])
+        turquoise = np.array([64, 224, 208])
         red = np.array([255, 0, 0])
+        black = np.zeros(3)
         video = []
         width_factor = 1. / episode_length * video_width
         for i, imgs in enumerate(images):
             for img in imgs:
                 img[-lower_part, :10] = orange
                 img[-lower_part, -10:] = orange
-                if episode_length < video_width:
-                    p_r_x = 0
-                    for j, (rew, ret) in enumerate(zip(rewards[:i], returns[:i])):
-                        r_x = int(j * width_factor)
-                        # render environment reward
-                        if rew < 0:
-                            img[-1:, p_r_x:r_x] = red
-                            img[-1:, p_r_x:r_x] = red
-                        else:
-                            rew_y = int(rew / max_reward * lower_part)
-                            img[-rew_y - 1:, p_r_x:r_x] = orange
-                            img[-rew_y - 1:, p_r_x:r_x] = orange
-                        # render discriminator reward
-                        if ret < 0:
-                            img[-1:, p_r_x:r_x] = red
-                            img[-1:, p_r_x:r_x] = red
-                        else:
-                            ret_y = int(ret / max_return * lower_part)
-                            img[-ret_y - 1:, p_r_x:r_x] = green
-                            img[-ret_y - 1:, p_r_x:r_x] = green
+                p_r_x = 0
+                for j, (rew, ret) in enumerate(zip(rewards[:i], returns[:i])):
+                    r_x = int(j * width_factor)
+                    if done_steps[j]:
+                        img[-lower_part:, p_r_x:r_x] = black
                         p_r_x = r_x
-                else:
-                    for j, (rew, ret) in enumerate(zip(rewards[:i], returns[:i])):
-                        r_x = int(j * width_factor)
+                        continue
+                    if rew > ret * 1.1:  # render bigger part in background (render it first)
                         # render environment reward
                         if rew < 0:
-                            img[-1:, r_x] = red
-                            img[-1:, r_x] = red
+                            img[-1:, p_r_x:r_x] = red
                         else:
                             rew_y = int(rew / max_reward * lower_part)
-                            img[-rew_y - 1:, r_x] = orange
-                            img[-rew_y - 1:, r_x] = orange
+                            img[-rew_y - 1:, p_r_x:r_x] = orange
                         # render discriminator reward
                         if ret < 0:
-                            img[-1:, r_x] = red
-                            img[-1:, r_x] = red
+                            img[-1:, p_r_x:r_x] = red
                         else:
                             ret_y = int(ret / max_return * lower_part)
-                            img[-ret_y - 1:, r_x] = green
-                            img[-ret_y - 1:, r_x] = green
+                            img[-ret_y - 1:, p_r_x:r_x] = turquoise
+                    else:
+                        # render discriminator reward
+                        if ret < 0:
+                            img[-1:, p_r_x:r_x] = red
+                        else:
+                            ret_y = int(ret / max_return * lower_part)
+                            img[-ret_y - 1:, p_r_x:r_x] = turquoise
+                        # render environment reward
+                        if rew < 0:
+                            img[-1:, p_r_x:r_x] = red
+                        else:
+                            rew_y = int(rew / max_reward * lower_part)
+                            img[-rew_y - 1:, p_r_x:r_x] = orange
+                    p_r_x = r_x
             video.append(np.hstack(imgs))
         imageio.mimsave(
             os.path.join(folder_name, "%s_iteration_%i.mp4" % (prefix, iteration)),
@@ -757,7 +761,7 @@ def main(num_timesteps: int, environment: str, expert_rollouts: str, **_):
                     episode_length=2048,
                     lam=0.95,
                     gamma=0.99,
-                    ent_coef=0.0,
+                    ent_coef=0.01,
                     lr=3e-4,
                     cliprange=0.2)
         video_saver = make_video_saver(
@@ -765,14 +769,14 @@ def main(num_timesteps: int, environment: str, expert_rollouts: str, **_):
             prefix='gail',
             interval=20
         )
-        gail.train(nminibatches=32,
+        gail.train(nminibatches=64,
                    noptepochs=10,
                    log_interval=1,
                    total_timesteps=num_timesteps,
                    callback=video_saver)
 
     experiment = Experiment('GAIL')
-    num_cpu = 4
+    num_cpu = 6
     experiment.run(run_gail, num_cpu)
 
 
