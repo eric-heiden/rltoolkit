@@ -59,7 +59,7 @@ class Experiment:
 
     def run(self,
             run_function: Callable[[int], None],
-            num_cpu: int):
+            num_cpu: int = 1):
         def run(seed: int):
             global _CURRENT
             _CURRENT = self
@@ -74,6 +74,14 @@ class Experiment:
                                         allow_growth=True))
             tf.Session(config=config).__enter__()
             return run_function(seed)
+
+        if num_cpu <= 1:
+            import random
+            seed = random.randint(0, 2 ** 32 - 1)
+            pathlib.Path(self.log_folder, "seed_%i" % seed).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.log_folder, "seed_%i" % seed, "videos").mkdir(parents=True, exist_ok=True)
+            run(seed)
+            return
 
         for seed in range(1, num_cpu + 1):
             pathlib.Path(self.log_folder, "seed_%i" % seed).mkdir(parents=True, exist_ok=True)

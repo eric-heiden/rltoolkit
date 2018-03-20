@@ -88,6 +88,8 @@ class DMSuiteEnv(gym.Env):
                               action_space=self.action_space)
         self.stop_criterion = stop_criterion
 
+        self._ep_length = 0
+
     def step(self, action):
         # noinspection PyBroadException
         try:
@@ -105,11 +107,13 @@ class DMSuiteEnv(gym.Env):
             reward = 0
 
         ob = self.observe()
-        return ob, reward, done, {}
+        self._ep_length += 1
+        return ob, reward, done, {'episode': {'r': reward, 'l': self._ep_length}}
 
     def reset(self):
         self.dm_env.reset()
         self.needs_reset = False
+        self._ep_length = 0
 
         if self.deterministic_reset:
             hinge = mjbindings.enums.mjtJoint.mjJNT_HINGE
