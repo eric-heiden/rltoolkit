@@ -54,7 +54,14 @@ def create_environment(name: str) -> gym.Env:
         from envs.deepmind import DMSuiteEnv
         return DMSuiteEnv(env_id)
     elif framework == 'gym':
-        return BetterRgbRenderingEnv(gym.make(env_id).env)
+        env = gym.make(env_id).env
+        from gym.envs.robotics.robot_env import RobotEnv
+        if not isinstance(env, RobotEnv):
+            env = BetterRgbRenderingEnv(env)
+        if isinstance(env.observation_space, gym.spaces.Dict):
+            from gym.wrappers import FlattenDictWrapper
+            env = FlattenDictWrapper(env, env.observation_space.spaces.keys())
+        return env
     elif framework == 'rllab':
         from envs.rllab import RllabEnv
         return RllabEnv(env_id)

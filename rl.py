@@ -30,6 +30,8 @@ from baselines.ddpg.noise import *
 
 
 def _render_frames(env):
+    if hasattr(env, 'env'):
+        return env.env.render(mode='rgb_array'),
     return env.render(mode='rgb_array'),
 
 
@@ -157,10 +159,13 @@ class RLToolkit:
 
         that = self
 
+        iter_name = 'iters_so_far'
+        if self.method == 'sql':
+            iter_name = 'epoch'
         # TODO replace with utils.create_callback(...)
         def callback(locals, globals):
             if that.method != "ddpg":
-                if load_policy is not None and locals['iters_so_far'] == 0:
+                if load_policy is not None and locals[iter_name] == 0:
                     # noinspection PyBroadException
                     try:
                         utils.load_state(load_policy)
@@ -169,11 +174,11 @@ class RLToolkit:
                             # save TensorFlow summary (contains at least the graph definition)
                     except:
                         logger.error("Failed to load policy network weights from %s." % load_policy)
-                if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] == 0:
+                if MPI.COMM_WORLD.Get_rank() == 0 and locals[iter_name] == 0:
                     _ = tf.summary.FileWriter(folder, tf.get_default_graph())
-            if MPI.COMM_WORLD.Get_rank() == 0 and locals['iters_so_far'] % save_every == 0:
+            if MPI.COMM_WORLD.Get_rank() == 0 and locals[iter_name] % save_every == 0:
                 print('Saving video and checkpoint for policy at iteration %i...' %
-                      locals['iters_so_far'])
+                      locals[iter_name])
                 ob = env.reset()
                 images = []
                 rewards = []
@@ -230,14 +235,14 @@ class RLToolkit:
 
                 imageio.mimsave(
                     os.path.join(folder, "videos", "%s_%s_iteration_%i.mp4" %
-                                 (that.environment, that.method, locals['iters_so_far'])),
+                                 (that.environment, that.method, locals[iter_name])),
                     video,
                     fps=60)
                 env.reset()
 
                 if that.method != "ddpg":
                     utils.save_state(os.path.join(that.folder, "checkpoints", "%s_%i" %
-                                                 (that.environment, locals['iters_so_far'])))
+                                                 (that.environment, locals[iter_name])))
 
         if self.method == "ppo":
             pposgd_simple.learn(
@@ -443,12 +448,12 @@ if __name__ == '__main__':
         '--method',
         help='reinforcement learning algorithm to use (ppo/trpo/ddpg/acktr/sql)',
         type=str,
-        default='ppo')
+        default='sql')
     parser.add_argument(
         '--environment',
         help='environment ID prefixed by framework, e.g. dm-cartpole-swingup, gym-CartPole-v0, rllab-cartpole',
         type=str,
-        default='dm-cartpole-swingup')
+        default='gym-FetchPush-v0')
     # gym-Hopper-v2
     # default='rllab-humanoid')
 
