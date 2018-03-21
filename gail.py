@@ -23,6 +23,7 @@ from experiment import log_parameters, Experiment
 
 sys.path.insert(0, osp.join(osp.dirname(__file__), 'baselines'))
 sys.path.insert(0, osp.join(osp.dirname(__file__), 'rllab'))
+utils.load_dm_control()
 
 from baselines import bench, logger
 from baselines.common.misc_util import (
@@ -36,6 +37,8 @@ from baselines.common.vec_env import VecEnv
 from baselines.common.distributions import make_pdtype
 from baselines.common import explained_variance
 from baselines.a2c.utils import fc
+
+from envs.deepmind import DMSuiteEnv
 
 
 # TODO merry rllab Policy class with this ABC definition
@@ -65,10 +68,13 @@ class Policy(ABC):
 PolicyFunction = Callable[[tf.Session, tuple, tuple, int, int, Optional[Union[bool, enum.Enum]], Optional[str]],
                           Policy]
 EnvType = Union[gym.Env, VecEnv, VecNormalize, DummyVecEnv]
+Descriptor = Callable[[EnvType, gym.Env, Policy, int, np.array, np.array, float], np.array]
+CallbackFunction = Callable[[object, int, EnvType, gym.Env, Policy, dict, dict], None]
 
 
 # Extracts features from a current time step to be used by the discriminator.
 def observations_and_actions(_env: EnvType,
+                             _raw_env: gym.Env,
                              _policy: Policy,
                              _time_step: int,
                              observation: np.array,
@@ -80,14 +86,47 @@ def observations_and_actions(_env: EnvType,
     return np.hstack((observation, action))
 
 
+def only_observations(_env: EnvType,
+                      _raw_env: gym.Env,
+                      _policy: Policy,
+                      _time_step: int,
+                      observation: np.array,
+                      _action: np.array,
+                      _env_reward: float) -> np.array:
+    """
+    Selects what the discriminator should see at every time step.
+    """
+    return observation
+
+
+def only_joint_angles(_env: EnvType,
+                      raw_env: DMSuiteEnv,
+                      _policy: Policy,
+                      _time_step: int,
+                      _observation: np.array,
+                      _action: np.array,
+                      _env_reward: float) -> np.array:
+    """
+    Selects what the discriminator should see at every time step.
+    """
+    return raw_env.dm_env.physics.joint_angles()
+
+
 class Discriminator:
     """
     Discriminator is a binary classifier.
     """
 
     @log_parameters
-    def __init__(self, state_dim, hidden_layers=(30, 30), hidden_activation=tf.tanh,
-                 entcoeff=0.001, learning_rate=1e-3, name_prefix=""):
+    def __init__(self,
+                 state_dim,
+                 hidden_layers=(30, 30),
+                 hidden_activation=tf.tanh,
+                 entcoeff=0.001,
+                 learning_rate=1e-4,
+                 name_prefix="",
+                 use_sgd=True,
+                 alter_objective=False):
         # map features (e.g. state-action pairs) to classifier scores
         # i.e. log-probabilities of (fake, real)
         assert len(hidden_layers) > 0
@@ -97,11 +136,11 @@ class Discriminator:
 
         input_shape = (None,) + state_dim
 
-        def build_graph(input, reuse: bool):
+        def build_graph(input_layer, reuse: bool):
             with tf.variable_scope(self.scope):
                 if reuse:
                     tf.get_variable_scope().reuse_variables()
-                hidden = input
+                hidden = input_layer
                 for i, size in enumerate(hidden_layers):
                     hidden = tf.layers.dense(hidden, size, hidden_activation, name='hidden%i' % i)
                 logit = tf.layers.dense(hidden, 1, tf.identity, name='logit')
@@ -137,7 +176,11 @@ class Discriminator:
         self.loss_name = ["generator_loss", "expert_loss", "entropy", "entropy_loss", "generator_acc", "expert_acc"]
         self.total_loss = generator_loss + expert_loss + entropy_loss
         # Build Reward for policy
-        self.reward_op = -tf.log(1 - tf.nn.sigmoid(generator_logits) + 1e-8)
+        if alter_objective:
+            self.reward_op = tf.log(tf.nn.sigmoid(generator_logits) + 1e-8)
+        else:
+            # traditional formulation [Goodfellow et. al (2014)]
+            self.reward_op = -tf.log(1 - tf.nn.sigmoid(generator_logits) + 1e-8)
         # var_list = self.get_trainable_variables()
         # self.lossandgrad = U.function(
         #     [self.generator_features, self.expert_features],
@@ -146,7 +189,10 @@ class Discriminator:
         params = self.get_trainable_variables()
         grads = tf.gradients(self.total_loss, params)
         grads = list(zip(grads, params))
-        trainer = tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-5)
+        if use_sgd:
+            trainer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
+        else:
+            trainer = tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-5)
         _train = trainer.apply_gradients(grads)
 
         def classify(features: np.array) -> float:
@@ -163,7 +209,7 @@ class Discriminator:
             }
             return sess.run([entropy, _train, *self.losses], feed_dict)
 
-        def compute_accuracies(self, generator_features: np.array, expert_features: np.array):
+        def compute_accuracies(generator_features: np.array, expert_features: np.array):
             feed_dict = {
                 self.generator_features: generator_features,
                 self.expert_features: expert_features
@@ -287,10 +333,9 @@ class GAIL:
                  env: gym.Env,
                  policy_fn: PolicyFunction,
                  expert_rollouts: np.array,
-                 descriptor: Callable[
-                     [EnvType, Policy, int, np.array, np.array, float], np.array] = observations_and_actions,
-                 discriminator_fn: Callable[[], Discriminator] = Discriminator,
-                 generator_fn: Callable[[], Generator] = Generator,
+                 descriptor: Descriptor = observations_and_actions,
+                 discriminator_fn: Callable[..., Discriminator] = Discriminator,
+                 generator_fn: Callable[..., Generator] = Generator,
                  episode_length: int = 2048,
                  lr: float = 3e-4,
                  ent_coef: float = 0.,
@@ -323,13 +368,13 @@ class GAIL:
         dummy_pi = policy_fn(sess, self.ob_space, self.ac_space, 1, 1, False, 'dummy_')
         tf.global_variables_initializer().run(session=sess)
         dummy_acs, _, _, _ = dummy_pi.step([dummy_ob])
-        dummy_ft = descriptor(self.env, dummy_pi, 0, dummy_ob, dummy_acs[0], 0)
-        logger.logkv("observation space", self.ob_space.shape[0])
-        logger.logkv("action space", self.ac_space.shape[0])
-        logger.logkv("feature space", dummy_ft.shape[0])
-        logger.dumpkvs()
+        dummy_ft = descriptor(self.env, self.raw_env, dummy_pi, 0, dummy_ob, dummy_acs[0], 0)
+        logger.log("observation space: %r" % self.ob_space.shape)
+        logger.log("action space:      %r" % self.ac_space.shape)
+        logger.log("feature space:     %r" % dummy_ft.shape)
         self.ft_shape = dummy_ft.shape
-        assert self.expert_rollouts.shape[1] == max(self.ft_shape)
+        assert self.expert_rollouts.shape[1] == self.ft_shape[0], \
+            "Expert rollouts don't match feature dimensions from descriptor"
         if self.expert_rollouts.shape[0] < episode_length:
             logger.warn("Length of expert rollouts is shorter than desired episode length.")
 
@@ -372,7 +417,8 @@ class GAIL:
         Computes generator's rollout rewarded by the discriminator.
         :return: Rollout stats of size episode_length for obs, features, rewards, etc.
         """
-        mb_obs, mb_features, mb_rewards, mb_env_rewards, mb_actions, mb_values, mb_dones, mb_neglogpacs = [], [], [], [], [], [], [], []
+        mb_obs, mb_features, mb_rewards, mb_env_rewards, mb_actions, mb_values, mb_dones, mb_neglogpacs = \
+            [], [], [], [], [], [], [], []
         mb_states = self.generator.initial_state
         dones = [False for _ in range(self.nenvs)]
         obs = np.zeros((self.nenvs,) + self.ob_space.shape, dtype=self.generator.train_model.obs.dtype.name)
@@ -388,7 +434,8 @@ class GAIL:
             obs[:], env_rewards, dones, infos = self.env.step(actions)
             mb_env_rewards.append(env_rewards[0])
             # compute discriminator's reward
-            features = self.descriptor(self.env, self.generator.act_model, time_step, obs, actions, env_rewards)
+            features = self.descriptor(self.env, self.raw_env, self.generator.act_model,
+                                       time_step, obs, actions, env_rewards)
             mb_features.append(features)
             rewards = self.discriminator.classify(features)
             mb_rewards.append(rewards[0])
@@ -399,7 +446,6 @@ class GAIL:
         # batch of steps to batch of rollouts
         mb_obs = np.array(mb_obs, dtype=np.float32)
         mb_rewards = np.asarray(mb_rewards, dtype=np.float32)
-        mb_env_rewards = np.asarray(mb_env_rewards, dtype=np.float32)
         mb_features = np.asarray(mb_features, dtype=np.float32)
         mb_actions = np.asarray(mb_actions)
         mb_values = np.asarray(mb_values, dtype=np.float32)
@@ -409,7 +455,7 @@ class GAIL:
         # discount/bootstrap off value fn
         mb_advs = np.zeros_like(mb_rewards)
         lastgaelam = 0
-        for t in reversed(range(mb_obs.shape[0]-1)):
+        for t in reversed(range(mb_obs.shape[0] - 1)):
             if t == self.episode_length - 1:
                 nextnonterminal = 1.0 - dones
                 nextvalues = last_values
@@ -456,7 +502,7 @@ class GAIL:
               save_interval: int = 0,
               discriminator_training_rounds: int = 3,
               discriminator_instance_noise_acc_threshold: float = 0.95,
-              callback: Callable[[object, int, EnvType, gym.Env, Policy, dict, dict], None] = lambda **args: None) -> None:
+              callback: CallbackFunction = lambda **_: None) -> None:
         """
         Trains generator and discriminator.
         :param discriminator_instance_noise_acc_threshold:
@@ -472,16 +518,18 @@ class GAIL:
         nbatch = self.nenvs * self.episode_length
         nbatch_train = nbatch // nminibatches
 
-        make_generator = lambda: self.generator_fn(
-            policy_fn=self.policy_fn,
-            ob_space=self.ob_space,
-            ac_space=self.ac_space,
-            nbatch_act=self.nenvs,
-            nbatch_train=nbatch_train,
-            nsteps=self.episode_length,
-            ent_coef=self.ent_coef,
-            vf_coef=self.vf_coef,
-            max_grad_norm=self.max_grad_norm)
+        def make_generator():
+            return self.generator_fn(
+                policy_fn=self.policy_fn,
+                ob_space=self.ob_space,
+                ac_space=self.ac_space,
+                nbatch_act=self.nenvs,
+                nbatch_train=nbatch_train,
+                nsteps=self.episode_length,
+                ent_coef=self.ent_coef,
+                vf_coef=self.vf_coef,
+                max_grad_norm=self.max_grad_norm)
+
         if save_interval and logger.get_dir():
             import cloudpickle
             with open(osp.join(logger.get_dir(), 'make_generator.pkl'), 'wb') as fh:
@@ -505,7 +553,8 @@ class GAIL:
 
             # compute rollout from generator
             # noinspection PyTupleAssignmentBalance
-            obs, generator_features, returns, masks, actions, values, neglogpacs, states, epinfos = self._run_generator()
+            obs, generator_features, returns, masks, actions, values, neglogpacs, states, epinfos = \
+                self._run_generator()
 
             #
             # train generator
@@ -554,12 +603,12 @@ class GAIL:
                 discriminator_losses[dis_round, :] = np.array(dis_losses)
 
             discriminator_losses = np.mean(discriminator_losses, axis=0)
-            dis_accuracy = .5*(discriminator_losses[4]+discriminator_losses[5])
+            dis_accuracy = .5 * (discriminator_losses[4] + discriminator_losses[5])
             if dis_accuracy > discriminator_instance_noise_acc_threshold:
                 self.discriminator_instance_noise_std *= 1.1
             elif dis_accuracy < discriminator_instance_noise_acc_threshold * 0.7:
                 self.discriminator_instance_noise_std /= 1.1
-            self.discriminator_instance_noise_std = min(200./update, min(0.5, self.discriminator_instance_noise_std))
+            self.discriminator_instance_noise_std = min(200. / update, min(0.5, self.discriminator_instance_noise_std))
 
             lossvals = np.mean(mblossvals, axis=0)
             tnow = time.time()
@@ -571,7 +620,7 @@ class GAIL:
                 logger.logkv("fps", fps)
 
                 logger.logkv("dis_accuracy", dis_accuracy)
-                logger.logkv("dis_loss", .5*(discriminator_losses[0]+discriminator_losses[1]))
+                logger.logkv("dis_loss", .5 * (discriminator_losses[0] + discriminator_losses[1]))
                 logger.logkv("dis_entropy", discriminator_losses[2])
                 logger.logkv("dis_entloss", discriminator_losses[3])
                 logger.logkv("dis_noise_std", self.discriminator_instance_noise_std)
@@ -648,7 +697,8 @@ def make_policy(hidden_layers=(64, 64), hidden_activation=tf.tanh):
 def make_video_saver(folder_name: str, prefix: str, episode_length: int = 500, interval: int = 5,
                      video_width: int = 512, video_height: int = 512, plot_rewards: bool = True,
                      break_when_done: bool = False):
-    def save_video(gail: GAIL, iteration: int, env: EnvType, raw_env: gym.Env, policy: Policy, _locals: dict, _globals: dict):
+    def save_video(gail: GAIL, iteration: int, env: EnvType, raw_env: gym.Env, policy: Policy, _locals: dict,
+                   _globals: dict):
         if iteration % interval != 0:
             return
         print('Saving video at iteration %i...' % iteration)
@@ -680,7 +730,7 @@ def make_video_saver(folder_name: str, prefix: str, episode_length: int = 500, i
                 rewards.append(rew)
                 max_reward = max(rew, max_reward)
                 # discriminator returns
-                features = gail.descriptor(env, policy, iteration, obs, action, rew)
+                features = gail.descriptor(env, raw_env, policy, iteration, obs, action, rew)
                 rets = gail.discriminator.classify(features)
                 returns.append(rets[0])
                 max_return = max(rets[0], max_return)
@@ -741,7 +791,7 @@ def make_video_saver(folder_name: str, prefix: str, episode_length: int = 500, i
     return save_video
 
 
-def main(num_timesteps: int, environment: str, expert_rollouts: str, **_):
+def main(num_timesteps: int, num_cpus: int, environment: str, expert_rollouts: str, **_):
     # load expert rollouts
     rollouts = pkl.load(open(expert_rollouts, "rb"))
     expert_rollouts = []
@@ -775,9 +825,8 @@ def main(num_timesteps: int, environment: str, expert_rollouts: str, **_):
                    total_timesteps=num_timesteps,
                    callback=video_saver)
 
-    experiment = Experiment('GAIL')
-    num_cpu = 6
-    experiment.run(run_gail, num_cpu)
+    experiment = Experiment('GAIL-%s' % environment)
+    experiment.run(run_gail, num_cpus)
 
 
 if __name__ == '__main__':
@@ -786,6 +835,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--num-timesteps', type=int, default=int(10e6))
+    parser.add_argument('--num-cpus', type=int, default=1)
     parser.add_argument(
         '--environment',
         help='environment ID prefixed by framework, e.g. dm-cartpole-swingup, gym-CartPole-v0, rllab-cartpole',

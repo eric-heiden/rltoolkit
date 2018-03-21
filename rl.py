@@ -60,7 +60,7 @@ class RLToolkit:
 
     def setup_logging(self, kwargs):
         folder_name, timestamp = self.make_folders(**kwargs)
-        logger.configure(dir=folder_name, format_strs=['log', 'stdout'])
+        logger.configure(dir=folder_name, format_strs=['log', 'stdout', 'csv', 'tensorboard'])
 
         run_json = {
             "time": timestamp,
@@ -149,10 +149,10 @@ class RLToolkit:
                 hid_size=pi_hid_size,
                 num_hid_layers=pi_num_hid_layers)
 
-        # env = bench.Monitor(
-        #     env,
-        #     logger.get_dir() and osp.join(logger.get_dir(), str(rank)),
-        #     allow_early_resets=True)
+        env = bench.Monitor(
+            env,
+            logger.get_dir() and osp.join(logger.get_dir(), str(rank)),
+            allow_early_resets=True)
         gym.logger.setLevel(logging.INFO)
 
         that = self

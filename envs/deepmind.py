@@ -106,8 +106,12 @@ class DMSuiteEnv(gym.Env):
             done = True
             reward = 0
 
+        if done:
+            self._ep_length = 0
+        else:
+            self._ep_length += 1
+
         ob = self.observe()
-        self._ep_length += 1
         return ob, reward, done, {'episode': {'r': reward, 'l': self._ep_length}}
 
     def reset(self):

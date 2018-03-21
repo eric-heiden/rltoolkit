@@ -41,8 +41,12 @@ class BetterRgbRenderingEnv(Wrapper):
             return data[::-1, :, :]
         return self.env.render(mode)
 
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
+
 
 def create_environment(name: str) -> gym.Env:
+    print('Creating environment %s...' % name)
     ids = name.split('-')
     framework = ids[0].lower()
     env_id = '-'.join(ids[1:])
